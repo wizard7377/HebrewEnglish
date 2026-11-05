@@ -1,8 +1,12 @@
 """The Davar reverse-lexicon page: English word in, Biblical Hebrew lexical possibilities out."""
 
+from functools import cache
+
 from nicegui import ui
 
+from hebrewenglish.backend.logic import Backend
 from hebrewenglish.gui import demo
+from hebrewenglish.gui.adapter import make_lookup
 from hebrewenglish.gui.theme import BORDER, HERO, PRIMARY_DARK, apply_theme
 from hebrewenglish.gui.widgets.elements import box, text
 from hebrewenglish.gui.widgets.results import Lookup, ResultsSection
@@ -18,7 +22,7 @@ def _header() -> None:
                 with box():
                     text("Davar", "block text-xl font-semibold leading-5 tracking-[-0.01em]", "span")
                     text("Biblical Hebrew Lexicon", "block text-[9px] font-semibold uppercase tracking-[0.16em]", "span")
-            text("Reverse lexicon · Prototype", "text-[11px] font-semibold uppercase tracking-[0.14em] max-sm:hidden", "span")
+            text("Reverse lexicon", "text-[11px] font-semibold uppercase tracking-[0.14em] max-sm:hidden", "span")
 
 
 def _footer() -> None:
@@ -27,7 +31,7 @@ def _footer() -> None:
         "text-[#98938a] sm:flex-row sm:items-center sm:justify-between",
         "footer",
     ):
-        text("Prototype lexical data · Forms shown for interface demonstration", tag="p")
+        text("Strong's Hebrew Dictionary · Morphology: Open Scriptures Hebrew Bible (WLC), CC BY 4.0", tag="p")
         text("Hebrew typography: SBL Hebrew / Noto Serif Hebrew", tag="p")
 
 
@@ -60,6 +64,17 @@ def build_page(lookup: Lookup) -> None:
             _footer()
 
 
+@cache
+def _lexicon_lookup() -> Lookup:
+    # Built on the first visit, so importing the page does not wait for the lexicon
+    return make_lookup(Backend())
+
+
 def davar_page() -> None:
-    """Page entry point, served with the demonstration lexicon until the backend supplies results."""
+    """Page entry point, served from the real lexicon and morphology."""
+    build_page(_lexicon_lookup())
+
+
+def demo_page() -> None:
+    """The same page over the hand-written demonstration entries."""
     build_page(demo.lookup)

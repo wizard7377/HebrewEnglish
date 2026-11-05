@@ -91,3 +91,16 @@ def test_nouns_hide_the_fixed_suffix_tab():
 def test_lookup_only_knows_demo_queries():
     assert lookup(" Guard ") == LEXICAL_RESULTS
     assert lookup("xyz") == []
+
+
+def test_suffixes_are_left_out_when_reconstruction_is_off():
+    from dataclasses import replace
+
+    attested_only = replace(SHAMAR, reconstruct_suffixes=False)
+    assert resolve_form(row(SHAMAR, "perfect", "שָׁמַר"), attested_only, SuffixId.P3MS) is None
+    assert resolve_form(row(SHAMAR, "imperative", "שְׁמֹר"), attested_only, SuffixId.P1CS).form == "שָׁמְרֵנִי"
+
+
+def test_entries_without_stems_show_every_group():
+    assert SHAMAR.stems == []
+    assert SHAMAR.groups_for(None) == SHAMAR.visible_groups

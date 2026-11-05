@@ -33,8 +33,12 @@ class ResultsSection:
         return True
 
     def _entry(self, result: LexicalResult, first: bool) -> EntryState:
-        # The most relevant result opens by default the first time it appears
-        return self._entries.setdefault(result.id, EntryState(expanded=first, tab=result.visible_groups[0].id))
+        # The most relevant result opens by default the first time it appears, on its most frequent stem
+        if result.id not in self._entries:
+            stem = result.stems[0] if result.stems else None
+            groups = result.groups_for(stem)
+            self._entries[result.id] = EntryState(expanded=first, tab=groups[0].id if groups else "", stem=stem)
+        return self._entries[result.id]
 
     @ui.refreshable_method
     def render(self) -> None:
@@ -66,9 +70,9 @@ class ResultsSection:
         with box(f"rounded border border-[{BORDER}] bg-white px-6 py-14 text-center shadow-sm"):
             with box("mx-auto flex h-11 w-11 items-center justify-center rounded-full bg-[#eee8db] text-[#786c52]"):
                 ui.icon("search", size="20px")
-            text(f"No prototype entry for “{query}”", "mt-4 text-2xl text-[#30383c]", "h2")
+            text(f"No entry for “{query}”", "mt-4 text-2xl text-[#30383c]", "h2")
             text(
-                "This interface uses a focused demonstration lexicon. Try one of the related English terms below.",
+                "Nothing in the lexicon matched this word. Try one of the English terms below.",
                 "mx-auto mt-2 max-w-md text-sm leading-6 text-[#77736b]",
                 "p",
             )

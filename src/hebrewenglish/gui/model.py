@@ -1,7 +1,7 @@
 """View model for the Davar reverse-lexicon page.
 
-These types mirror the Figma Make prototype's ``lexiconData.ts``. They hold display data only,
-so a later adapter can fill them from the real lexicon and morphology tables.
+These types mirror the Figma Make prototype's ``lexiconData.ts``. They hold display data only:
+``gui/adapter.py`` fills them from the real lexicon and morphology, ``gui/demo.py`` by hand.
 """
 
 from dataclasses import dataclass, field
@@ -74,6 +74,12 @@ class MorphologyRow:
     note: Maybe[str] = None
     alternative: Maybe[str] = None
     references: tuple[str, ...] = ()
+    # Identifies the row in suffixed_forms when its form alone would not, e.g. a slot only attested with a suffix
+    key: Maybe[str] = None
+
+    @property
+    def suffix_key(self) -> str:
+        return self.key or self.form
 
 
 @dataclass
@@ -82,6 +88,8 @@ class MorphologyGroup:
     label: str
     description: str
     rows: list[MorphologyRow]
+    # The verbal stem (Qal, Niphal…) a group belongs to; groups of other parts of speech have none
+    stem: Maybe[str] = None
 
 
 @dataclass(frozen=True)
@@ -115,8 +123,10 @@ class LexicalResult:
     properties: list[Property]
     morphology: list[MorphologyGroup]
     category_label: Maybe[str] = None
-    # Attested suffixed forms, keyed by (unsuffixed form, suffix); anything missing is reconstructed
+    # Attested suffixed forms, keyed by (row suffix key, suffix)
     suffixed_forms: dict[tuple[str, SuffixId], ResolvedForm] = field(default_factory=dict)
+    # Whether a suffix missing from suffixed_forms is built by joining base and suffix, or left out
+    reconstruct_suffixes: bool = True
 
     @property
     def root(self) -> str:
@@ -130,6 +140,16 @@ class LexicalResult:
         return self.morphology
 
     @property
+    def stems(self) -> list[str]:
+        return list(dict.fromkeys(group.stem for group in self.morphology if group.stem is not None))
+
+    def groups_for(self, stem: Maybe[str]) -> list[MorphologyGroup]:
+        """The visible groups of one stem, or all of them when the entry has no stems."""
+        if not self.stems:
+            return self.visible_groups
+        return [group for group in self.visible_groups if group.stem == stem]
+
+    @property
     def suffix_label(self) -> Maybe[str]:
         return {
             "Verb": "Object suffix",
@@ -138,8 +158,11 @@ class LexicalResult:
         }.get(self.part_of_speech)
 
 
-def resolve_form(row: MorphologyRow, result: LexicalResult, suffix_id: SuffixId) -> ResolvedForm:
+def resolve_form(row: MorphologyRow, result: LexicalResult, suffix_id: SuffixId) -> Maybe[ResolvedForm]:
+    """The row's form with the suffix applied, or None when there is no such form to show."""
     if suffix_id is SuffixId.NONE:
+        if not row.form:
+            return None
         return ResolvedForm(
             base=row.form,
             suffix="",
@@ -149,9 +172,11 @@ def resolve_form(row: MorphologyRow, result: LexicalResult, suffix_id: SuffixId)
             references=row.references,
         )
 
-    known = result.suffixed_forms.get((row.form, suffix_id))
+    known = result.suffixed_forms.get((row.suffix_key, suffix_id))
     if known is not None:
         return known
+    if not result.reconstruct_suffixes or not row.form:
+        return None
 
     option = SUFFIX_OPTIONS[suffix_id]
     suffix = option.noun if result.part_of_speech == "Noun" else option.verb
@@ -190,7 +215,10 @@ def highlight_segments(resolved: ResolvedForm, root: str) -> list[Segment]:
     root_index = 0
     segments: list[Segment] = []
     for cluster in split_clusters(resolved.base):
-        if root_index < len(root_letters) and bare_consonant(cluster) == root_letters[root_index]:
+        # Without a known root nothing can be told apart as inflection
+        if not root_letters:
+            segments.append(("root", cluster))
+        elif root_index < len(root_letters) and bare_consonant(cluster) == root_letters[root_index]:
             root_index += 1
             segments.append(("root", cluster))
         else:
