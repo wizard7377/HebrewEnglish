@@ -1,13 +1,14 @@
 """Builds the page's view model from the backend: Strong's entries, OSHB forms and lexical-index roots."""
 
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from functools import lru_cache
-import re
 
 from hebrewenglish.backend.logic import Backend, FormRecord, LemmaMorphology
 from hebrewenglish.common.books import format_oshb_ref, oshb_sort_key
 from hebrewenglish.common.maybe import Maybe
+from hebrewenglish.common.strong import Strong
 from hebrewenglish.gui.model import (
     SUFFIX_OPTIONS,
     Attestation,
@@ -21,6 +22,15 @@ from hebrewenglish.gui.model import (
     bare_consonant,
     split_clusters,
 )
+from hebrewenglish.inflect.generate import (
+    SUPPORTED_STEMS,
+    Slot,
+    code_of,
+    reconstruct,
+    slot_of,
+)
+from hebrewenglish.inflect.letters import with_conjunction
+from hebrewenglish.inflect.roots import VerbRoot, verb_root
 from hebrewenglish.lexicon.morphs.codes import (
     AdjectiveMorphCode,
     Gender,
@@ -37,6 +47,7 @@ from hebrewenglish.lexicon.morphs.codes import (
     SuffixMorphCode,
     SuffixTypes,
     VerbMorphCode,
+    VerbStemHebrew,
     VerbTypes,
     parse_code,
 )
@@ -46,30 +57,60 @@ MAX_REFERENCES = 6
 
 # Group id, label, description and the verb types it collects, in display order
 _CONJUGATIONS: list[tuple[str, str, str, tuple[VerbTypes, ...]]] = [
-    ("perfect", "Perfect", "Completed action, commonly narrated as a whole.", (VerbTypes.SimplePerfect,)),
+    (
+        "perfect",
+        "Perfect",
+        "Completed action, commonly narrated as a whole.",
+        (VerbTypes.SimplePerfect,),
+    ),
     (
         "sequential-perfect",
         "Sequential perfect",
         "Perfect with waw-consecutive, carrying on future or instructional sequences.",
         (VerbTypes.SequentialPerfect,),
     ),
-    ("imperfect", "Imperfect", "Incomplete, habitual, or future action.", (VerbTypes.Imperfect,)),
+    (
+        "imperfect",
+        "Imperfect",
+        "Incomplete, habitual, or future action.",
+        (VerbTypes.Imperfect,),
+    ),
     (
         "sequential-imperfect",
         "Sequential imperfect",
         "Imperfect with waw-consecutive, the main tense of past narrative.",
         (VerbTypes.SequentialImperfect,),
     ),
-    ("cohortative", "Cohortative", "First-person resolve or wish: let me, let us.", (VerbTypes.Cohortative,)),
-    ("jussive", "Jussive", "Third- or second-person wish or command: may he, let him.", (VerbTypes.Jussive,)),
-    ("imperative", "Imperative", "Direct second-person command.", (VerbTypes.Imperative,)),
+    (
+        "cohortative",
+        "Cohortative",
+        "First-person resolve or wish: let me, let us.",
+        (VerbTypes.Cohortative,),
+    ),
+    (
+        "jussive",
+        "Jussive",
+        "Third- or second-person wish or command: may he, let him.",
+        (VerbTypes.Jussive,),
+    ),
+    (
+        "imperative",
+        "Imperative",
+        "Direct second-person command.",
+        (VerbTypes.Imperative,),
+    ),
     (
         "active-participle",
         "Active participle",
         "Ongoing action, or the one who performs it.",
         (VerbTypes.ActiveParticiple,),
     ),
-    ("passive-participle", "Passive participle", "The one acted upon.", (VerbTypes.PassiveParticiple,)),
+    (
+        "passive-participle",
+        "Passive participle",
+        "The one acted upon.",
+        (VerbTypes.PassiveParticiple,),
+    ),
     (
         "infinitive",
         "Infinitive",
@@ -77,24 +118,53 @@ _CONJUGATIONS: list[tuple[str, str, str, tuple[VerbTypes, ...]]] = [
         (VerbTypes.InfinitiveAbsolute, VerbTypes.InfinitiveConstruct),
     ),
 ]
-_CONJUGATION_OF = {typ: index for index, (*_, types) in enumerate(_CONJUGATIONS) for typ in types}
+_CONJUGATION_OF = {
+    typ: index for index, (*_, types) in enumerate(_CONJUGATIONS) for typ in types
+}
 
 _STATES: dict[Maybe[State], tuple[str, str, str]] = {
     State.Absolute: ("absolute", "Absolute", "Free-standing form."),
-    State.Construct: ("construct", "Construct", "Bound form, joined to a following noun or suffix."),
-    State.Determined: ("determined", "Determined", "Aramaic emphatic state, marking the noun as definite."),
+    State.Construct: (
+        "construct",
+        "Construct",
+        "Bound form, joined to a following noun or suffix.",
+    ),
+    State.Determined: (
+        "determined",
+        "Determined",
+        "Aramaic emphatic state, marking the noun as definite.",
+    ),
     None: ("forms", "Forms", "Attested forms."),
 }
 
 _PERSONS = {Person.Third: "3rd", Person.Second: "2nd", Person.First: "1st"}
-_GENDER_ABBREVIATIONS = {Gender.Masculine: "masc.", Gender.Feminine: "fem.", Gender.Common: "common", Gender.Both: "common"}
-_GENDERS = {Gender.Masculine: "Masculine", Gender.Feminine: "Feminine", Gender.Common: "Common", Gender.Both: "Common"}
+_GENDER_ABBREVIATIONS = {
+    Gender.Masculine: "masc.",
+    Gender.Feminine: "fem.",
+    Gender.Common: "common",
+    Gender.Both: "common",
+}
+_GENDERS = {
+    Gender.Masculine: "Masculine",
+    Gender.Feminine: "Feminine",
+    Gender.Common: "Common",
+    Gender.Both: "Common",
+}
 # The paradigm has singular and plural columns only, so duals sit with the plurals
 _NUMBERS = {Number.Singular: "singular", Number.Plural: "plural", Number.Dual: "plural"}
-_NOUN_NUMBERS = {Number.Singular: "singular", Number.Plural: "plural", Number.Dual: "dual"}
+_NOUN_NUMBERS = {
+    Number.Singular: "singular",
+    Number.Plural: "plural",
+    Number.Dual: "dual",
+}
 _ORDER = {
     **{p: i for i, p in enumerate([Person.Third, Person.Second, Person.First])},
-    **{g: i for i, g in enumerate([Gender.Masculine, Gender.Feminine, Gender.Common, Gender.Both])},
+    **{
+        g: i
+        for i, g in enumerate(
+            [Gender.Masculine, Gender.Feminine, Gender.Common, Gender.Both]
+        )
+    },
     **{n: i for i, n in enumerate([Number.Singular, Number.Dual, Number.Plural])},
 }
 
@@ -133,7 +203,13 @@ def _verb_slot(code: VerbMorphCode) -> Maybe[_Slot]:
     if code.typ in (VerbTypes.ActiveParticiple, VerbTypes.PassiveParticiple):
         # The paradigm has one cell per gender and number, so the construct only fills in for a missing absolute
         label = f"{_GENDERS[code.gender]} {_NUMBERS[code.number]}"
-        return _Slot(group, stem, label, _order(code.number, code.gender), 0 if code.state is not State.Construct else 1)
+        return _Slot(
+            group,
+            stem,
+            label,
+            _order(code.number, code.gender),
+            0 if code.state is not State.Construct else 1,
+        )
     if code.person is None:
         return None
     label = f"{_PERSONS[code.person]} {_GENDER_ABBREVIATIONS[code.gender]} {_NUMBERS[code.number]}"
@@ -145,14 +221,18 @@ def _nominal_slot(code: NounMorphCode | AdjectiveMorphCode) -> _Slot:
     parts = [_GENDERS[code.gender]] if code.gender else []
     parts.append(_NOUN_NUMBERS[code.number] if code.number else "form")
     label = " ".join(parts)
-    return _Slot(group, None, label[0].upper() + label[1:], _order(code.number, code.gender))
+    return _Slot(
+        group, None, label[0].upper() + label[1:], _order(code.number, code.gender)
+    )
 
 
 def _other_slot(code: MorphCode, group: str) -> _Slot:
     match code:
         case PrepositionMorphCode(typ=PrepositionTypes.DefiniteArticle):
             return _Slot(group, None, "With article", (1,))
-        case PronounMorphCode(person=person, gender=gender, number=number) if number is not None:
+        case PronounMorphCode(person=person, gender=gender, number=number) if (
+            number is not None
+        ):
             parts = [_PERSONS[person]] if person else []
             parts += [_GENDER_ABBREVIATIONS[gender]] if gender else []
             parts.append(_NUMBERS[number])
@@ -171,7 +251,12 @@ def _slot(code: MorphCode, part_of_speech: str) -> Maybe[_Slot]:
         case NounMorphCode() | AdjectiveMorphCode():
             return _nominal_slot(code)
         case _:
-            return _other_slot(code, "pronominal-contraction" if part_of_speech == "Preposition" else "forms")
+            return _other_slot(
+                code,
+                "pronominal-contraction"
+                if part_of_speech == "Preposition"
+                else "forms",
+            )
 
 
 def _suffix_id(code: MorphCode) -> Maybe[SuffixId]:
@@ -218,8 +303,13 @@ def split_suffix(form: str, suffix_id: SuffixId) -> tuple[str, str]:
     option = SUFFIX_OPTIONS[suffix_id]
     for spelling in dict.fromkeys([option.verb, option.noun]):
         letters = [bare_consonant(cluster) for cluster in split_clusters(spelling)]
-        if 0 < len(letters) < len(clusters) and [bare_consonant(c) for c in clusters[-len(letters) :]] == letters:
-            return "".join(clusters[: -len(letters)]), "".join(clusters[-len(letters) :])
+        if (
+            0 < len(letters) < len(clusters)
+            and [bare_consonant(c) for c in clusters[-len(letters) :]] == letters
+        ):
+            return "".join(clusters[: -len(letters)]), "".join(
+                clusters[-len(letters) :]
+            )
     return form, ""
 
 
@@ -237,7 +327,11 @@ def _ranked(variants: list[FormRecord]) -> list[FormRecord]:
     for variant in variants:
         known = merged.get(variant.text)
         merged[variant.text] = (
-            variant if known is None else FormRecord(variant.text, known.count + variant.count, known.refs + variant.refs)
+            variant
+            if known is None
+            else FormRecord(
+                variant.text, known.count + variant.count, known.refs + variant.refs
+            )
         )
     return sorted(merged.values(), key=lambda v: -v.count)
 
@@ -249,6 +343,8 @@ class _GroupForms:
     stem: Maybe[str]
     rows: dict[str, tuple[_Slot, list[FormRecord]]] = field(default_factory=dict)
     suffixed: dict[tuple[str, SuffixId], list[FormRecord]] = field(default_factory=dict)
+    # Generated forms for rows the Bible has no plain form of
+    reconstructed: dict[str, str] = field(default_factory=dict)
     count: int = 0
 
 
@@ -257,15 +353,61 @@ def _group_meta(group_id: str) -> tuple[str, str]:
         if conjugation == group_id:
             return label, description
     if group_id == "pronominal-contraction":
-        return "Forms", "The preposition alone, with the article, and contracted with pronominal suffixes."
+        return (
+            "Forms",
+            "The preposition alone, with the article, and contracted with pronominal suffixes.",
+        )
     for state_id, label, description in _STATES.values():
         if state_id == group_id:
             return label, description
     return group_id.title(), ""
 
 
+def _reconstruct(
+    verb: VerbRoot,
+    lemma: LemmaMorphology,
+    collected: dict[tuple[Maybe[str], str], _GroupForms],
+) -> None:
+    """Fill the missing cells of each stem the verb is attested in with generated forms."""
+    stems: set[str] = set()
+    # The generator fits to plain forms only, since it makes no suffixed ones
+    plain: dict[Slot, list[str]] = {}
+    for usage, forms in lemma.usages.items():
+        parsed = parse_usage(usage)
+        if (
+            parsed is None
+            or not isinstance(parsed.own, VerbMorphCode)
+            or not isinstance(parsed.own.stem, VerbStemHebrew)
+        ):
+            continue
+        stems.add(parsed.own.stem.value)
+        cell = slot_of(parsed.own) if parsed.suffix is None else None
+        if cell is not None:
+            plain.setdefault(cell, []).extend(form.text for form in forms)
+
+    for stem in sorted(stems & SUPPORTED_STEMS):
+        for cell, generated in reconstruct(verb, stem, plain).items():
+            slot = _verb_slot(code_of(cell))
+            if slot is None:
+                continue
+            group = collected.setdefault(
+                (slot.stem, slot.group), _GroupForms(slot.stem)
+            )
+            _, attested = group.rows.setdefault(slot.label, (slot, []))
+            # A construct participle shares its absolute's row, which then has a form already
+            if not attested:
+                group.reconstructed[slot.label] = generated
+
+
+# The OSHB writes a sequential form's ו apart, as a conjunction, so it is put back for display
+_SPELLINGS: dict[str, Callable[[str], str]] = {
+    "sequential-perfect": with_conjunction,
+    "sequential-imperfect": lambda form: with_conjunction(form, consecutive=True),
+}
+
+
 def morphology_groups(
-    lemma: LemmaMorphology, part_of_speech: str
+    lemma: LemmaMorphology, part_of_speech: str, verb: Maybe[VerbRoot] = None
 ) -> tuple[list[MorphologyGroup], dict[tuple[str, SuffixId], ResolvedForm]]:
     collected: dict[tuple[Maybe[str], str], _GroupForms] = {}
     for usage, forms in lemma.usages.items():
@@ -287,18 +429,30 @@ def morphology_groups(
             elif slot.rank == best.rank:
                 variants.extend(forms)
 
+    if verb is not None:
+        _reconstruct(verb, lemma, collected)
+
     stem_counts: dict[Maybe[str], int] = {}
     for (stem, _), group in collected.items():
         stem_counts[stem] = stem_counts.get(stem, 0) + group.count
-    group_order = [g for g, *_ in _CONJUGATIONS] + ["pronominal-contraction"] + [s[0] for s in _STATES.values()]
+    group_order = (
+        [g for g, *_ in _CONJUGATIONS]
+        + ["pronominal-contraction"]
+        + [s[0] for s in _STATES.values()]
+    )
 
     groups: list[MorphologyGroup] = []
     suffixed_forms: dict[tuple[str, SuffixId], ResolvedForm] = {}
-    keys = sorted(collected, key=lambda k: (-stem_counts[k[0]], group_order.index(k[1])))
+    keys = sorted(
+        collected, key=lambda k: (-stem_counts[k[0]], group_order.index(k[1]))
+    )
     for stem, group_id in keys:
         forms = collected[(stem, group_id)]
+        spell = _SPELLINGS.get(group_id, str)
         rows: list[MorphologyRow] = []
-        for slot, variants in sorted(forms.rows.values(), key=lambda entry: entry[0].order):
+        for slot, variants in sorted(
+            forms.rows.values(), key=lambda entry: entry[0].order
+        ):
             ranked = _ranked(variants)
             # Unique across stems and groups, so a slot attested only with suffixes still has a key
             key = f"{stem}/{group_id}/{slot.label}"
@@ -307,23 +461,57 @@ def morphology_groups(
                 rows.append(
                     MorphologyRow(
                         label=slot.label,
-                        form=ranked[0].text,
+                        form=spell(ranked[0].text),
                         transliteration="",
                         attestation=Attestation.ATTESTED,
                         note=f"{total} occurrence{'s' if total != 1 else ''}",
-                        alternative=ranked[1].text if len(ranked) > 1 else None,
+                        alternative=spell(ranked[1].text) if len(ranked) > 1 else None,
                         references=format_references(ranked[0].refs),
                         key=key,
                     )
                 )
+            elif slot.label in forms.reconstructed:
+                with_suffixes = any(
+                    (slot.label, suffix_id) in forms.suffixed for suffix_id in SuffixId
+                )
+                note = (
+                    "Reconstructed · attested with suffixes"
+                    if with_suffixes
+                    else "Reconstructed"
+                )
+                rows.append(
+                    MorphologyRow(
+                        slot.label,
+                        spell(forms.reconstructed[slot.label]),
+                        "",
+                        Attestation.UNATTESTED,
+                        note,
+                        key=key,
+                    )
+                )
             else:
-                rows.append(MorphologyRow(slot.label, "", "", Attestation.UNATTESTED, note="Only with suffixes", key=key))
+                rows.append(
+                    MorphologyRow(
+                        slot.label,
+                        "",
+                        "",
+                        Attestation.UNATTESTED,
+                        note="Only with suffixes",
+                        key=key,
+                    )
+                )
             for suffix_id in SuffixId:
                 suffixed = _ranked(forms.suffixed.get((slot.label, suffix_id), []))
                 if suffixed:
-                    base, suffix = split_suffix(suffixed[0].text, suffix_id)
+                    text = spell(suffixed[0].text)
+                    base, suffix = split_suffix(text, suffix_id)
                     suffixed_forms[(key, suffix_id)] = ResolvedForm(
-                        base, suffix, suffixed[0].text, "", Attestation.ATTESTED, format_references(suffixed[0].refs)
+                        base,
+                        suffix,
+                        text,
+                        "",
+                        Attestation.ATTESTED,
+                        format_references(suffixed[0].refs),
                     )
         label, description = _group_meta(group_id)
         groups.append(MorphologyGroup(group_id, label, description, rows, stem))
@@ -342,11 +530,15 @@ _STRONG_PARTS_OF_SPEECH = {
 }
 
 
-def part_of_speech(lemma: Maybe[LemmaMorphology], strong: Maybe[StrongLexiconEntry]) -> str:
+def part_of_speech(
+    lemma: Maybe[LemmaMorphology], strong: Maybe[StrongLexiconEntry]
+) -> str:
     pos = lemma.pos if lemma else None
     if not pos and lemma and lemma.usages:
         pos = next(iter(lemma.usages))[1:]
-    if (pos and pos.startswith("Np")) or (strong and (strong.lang == "x-pn" or "n-pr" in strong.pos)):
+    if (pos and pos.startswith("Np")) or (
+        strong and (strong.lang == "x-pn" or "n-pr" in strong.pos)
+    ):
         return "Proper name"
     if pos:
         try:
@@ -354,7 +546,9 @@ def part_of_speech(lemma: Maybe[LemmaMorphology], strong: Maybe[StrongLexiconEnt
         except ValueError:
             pass
     if strong:
-        return _STRONG_PARTS_OF_SPEECH.get(strong.pos.split("-")[0], strong.pos or "Word")
+        return _STRONG_PARTS_OF_SPEECH.get(
+            strong.pos.split("-")[0], strong.pos or "Word"
+        )
     return "Word"
 
 
@@ -378,16 +572,30 @@ def _sentence(value: str) -> str:
 
 
 def lemma_result(
-    strong_id: str, strong: Maybe[StrongLexiconEntry], lemma: Maybe[LemmaMorphology], root: Maybe[str]
+    strong_id: str,
+    strong: Maybe[StrongLexiconEntry],
+    lemma: Maybe[LemmaMorphology],
+    root: Maybe[str],
 ) -> LexicalResult:
     """One lexical possibility from a Strong's entry and, when there is one, the OSHB lemma filed under it."""
     pos = part_of_speech(lemma, strong)
-    lang = lemma.lang if lemma else ("arc" if strong and strong.lang == "arc" else "heb")
+    lang = (
+        lemma.lang if lemma else ("arc" if strong and strong.lang == "arc" else "heb")
+    )
     category, category_label = _category(lang, pos)
-    groups, suffixed_forms = morphology_groups(lemma, pos) if lemma else ([], {})
+    verb = (
+        verb_root(root, lemma.lemma)
+        if lemma and lemma.lemma and pos == "Verb" and lang == "heb"
+        else None
+    )
+    groups, suffixed_forms = morphology_groups(lemma, pos, verb) if lemma else ([], {})
 
-    gloss = (lemma.gloss if lemma else None) or (strong.defs[0] if strong and strong.defs else "")
+    gloss = (lemma.gloss if lemma else None) or (
+        strong.defs[0] if strong and strong.defs else ""
+    )
     properties = [Property("Root", root, hebrew=True)] if root else []
+    if verb is not None:
+        properties.append(Property("Verb class", verb.label))
     properties.append(Property("Language", _language(lang)))
     stems = list(dict.fromkeys(group.stem for group in groups if group.stem))
     if stems:
@@ -403,15 +611,38 @@ def lemma_result(
         part_of_speech=pos,
         category=category,
         lemma=(lemma.lemma if lemma else None) or (strong.lemma if strong else ""),
-        transliteration=(lemma.xlit if lemma else None) or (strong.xlit if strong else ""),
+        transliteration=(lemma.xlit if lemma else None)
+        or (strong.xlit if strong else ""),
         short_definition=_sentence(gloss),
-        long_definition=_sentence(strong.meaning) if strong and strong.meaning else _sentence(gloss),
+        long_definition=_sentence(strong.meaning)
+        if strong and strong.meaning
+        else _sentence(gloss),
         properties=properties,
         morphology=groups,
         category_label=category_label,
         suffixed_forms=suffixed_forms,
         reconstruct_suffixes=False,
+        strong_number=strong_id.removeprefix("H"),
+        occurrences=lemma.count if lemma else None,
     )
+
+
+def _results(backend: Backend, strong_numbers: Iterable[Strong]) -> list[LexicalResult]:
+    """A lexical possibility for each lemma filed under each Strong's number, in the order given."""
+    results: dict[str, LexicalResult] = {}
+    for strong_number in strong_numbers:
+        strong_id = f"H{strong_number.index}"
+        entry = backend.get_lexicon_entry(strong_number)
+        lemmas = backend.get_morphology(strong_number)
+        found = (
+            [lemma_result(strong_id, entry, lemma, backend.root(lemma)) for lemma in lemmas]
+            if lemmas
+            else [lemma_result(strong_id, entry, None, None)]
+        )
+        # A split entry's lemmas can each be found on their own as well as under the plain number
+        for result in found:
+            results.setdefault(result.id, result)
+    return list(results.values())
 
 
 def make_lookup(backend: Backend, n: int = 8) -> Callable[[str], list[LexicalResult]]:
@@ -419,15 +650,16 @@ def make_lookup(backend: Backend, n: int = 8) -> Callable[[str], list[LexicalRes
 
     @lru_cache(maxsize=256)
     def cached(query: str) -> list[LexicalResult]:
-        results: list[LexicalResult] = []
-        for strong_number in backend.search_string(query, n):
-            strong_id = f"H{strong_number.index}"
-            entry = backend.get_lexicon_entry(strong_number)
-            lemmas = backend.get_morphology(strong_number)
-            if not lemmas:
-                results.append(lemma_result(strong_id, entry, None, None))
-            for lemma in lemmas:
-                results.append(lemma_result(strong_id, entry, lemma, backend.root(lemma)))
-        return results
+        return _results(backend, backend.search_string(query, n))
 
     return lambda query: cached(" ".join(query.lower().split()))
+
+
+def make_hebrew_lookup(backend: Backend, n: int = 8) -> Callable[[str], list[LexicalResult]]:
+    """Hebrew word -> the lemmas spelled most like it, cached like :func:`make_lookup`."""
+
+    @lru_cache(maxsize=256)
+    def cached(query: str) -> list[LexicalResult]:
+        return _results(backend, backend.search_hebrew(query, n))
+
+    return lambda query: cached(query.strip())

@@ -1,9 +1,11 @@
 from dataclasses import dataclass
+from functools import cached_property
 
 from hebrewenglish.common.maybe import Maybe
 from hebrewenglish.common.strong import Strong, parse_strong
 from hebrewenglish.lexicon import res
 from hebrewenglish.lexicon.res import StrongLexiconEntry
+from hebrewenglish.lexicon.similar import HebrewIndex, IndexedLemma
 
 
 @dataclass(frozen=True)
@@ -41,7 +43,10 @@ def lemma_morphology(key: str, record: dict) -> LemmaMorphology:
         count=record.get("count", 0),
         index=record.get("index"),
         usages={
-            code: [FormRecord(form["text"], form["count"], form["refs"]) for form in usage["forms"]]
+            code: [
+                FormRecord(form["text"], form["count"], form["refs"])
+                for form in usage["forms"]
+            ]
             for code, usage in record["usages"].items()
         },
     )
@@ -72,7 +77,38 @@ class Backend:
         """
         if not input.strip():
             return []
-        found = (parse_strong(self._strong_ids[i][1:]) for i, _ in res.STRONG_MATCHER.get_matches(input.strip(), n))
+        found = (
+            parse_strong(self._strong_ids[i][1:])
+            for i, _ in res.STRONG_MATCHER.get_matches(input.strip(), n)
+        )
+        return [strong for strong in found if strong is not None]
+
+    @cached_property
+    def _hebrew_index(self) -> HebrewIndex:
+        # Built on the first Hebrew search, since it reads every attested form
+        return HebrewIndex(
+            IndexedLemma(
+                key,
+                record["lemma"],
+                tuple(form["text"] for usage in record["usages"].values() for form in usage["forms"]),
+                _index_root(record.get("index")),
+                record.get("count", 0),
+            )
+            for key, record in res.MORPH_DATA.items()
+            if record.get("lemma") and parse_strong(key) is not None
+        )
+
+    def search_hebrew(self, input: str, n: int = 8) -> list[Strong]:
+        """Given a Hebrew word, pointed or not, find the lemmas spelled most like it, best first.
+
+        Args:
+            input (str): The Hebrew word, as written in a dictionary or inflected in a verse
+            n (int): How many lemmas to return
+
+        Returns:
+            list[Strong]: One per lemma, a split entry's lemma carrying its letter ("122a")
+        """
+        found = (parse_strong(key) for key in self._hebrew_index.search(input, n))
         return [strong for strong in found if strong is not None]
 
     def get_lexicon_entry(self, strong_number: Strong) -> Maybe[StrongLexiconEntry]:
@@ -96,7 +132,11 @@ class Backend:
         """
         keys = self._morph_keys.get(f"H{strong_number.index}", [])
         if strong_number.modifier is not None:
-            keys = [key for key in keys if key == f"{strong_number.index}{strong_number.modifier}"]
+            keys = [
+                key
+                for key in keys
+                if key == f"{strong_number.index}{strong_number.modifier}"
+            ]
         return [lemma_morphology(key, res.MORPH_DATA[key]) for key in keys]
 
     def root(self, lemma: LemmaMorphology) -> Maybe[str]:
@@ -104,9 +144,16 @@ class Backend:
 
         Only the main entry of a word group records its root, so derived words borrow it from a related entry.
         """
-        entry = res.INDEX.get(lemma.index or "")
-        if entry is None:
-            return None
-        if "root" in entry:
-            return entry["root"]
-        return next((res.INDEX[r]["root"] for r in entry.get("related", []) if "root" in res.INDEX.get(r, {})), None)
+        return _index_root(lemma.index)
+
+
+def _index_root(index_id: Maybe[str]) -> Maybe[str]:
+    entry = res.INDEX.get(index_id or "")
+    if entry is None:
+        return None
+    if "root" in entry:
+        return entry["root"]
+    return next(
+        (res.INDEX[r]["root"] for r in entry.get("related", []) if "root" in res.INDEX.get(r, {})),
+        None,
+    )

@@ -1,0 +1,15 @@
+.venv
+.git
+.github
+.claude
+.idea
+.vscode
+.pytest_cache
+.ruff_cache
+**/__pycache__
+dist
+exports
+scripts
+site
+src/test
+main.pdf

@@ -10,13 +10,19 @@ from hebrewenglish.gui.model import (
     ResolvedForm,
     SuffixId,
 )
+from hebrewenglish.lexicon.similar import consonants, skeleton
 
 SUPPORTED_QUERIES = ["guard", "keep", "watch", "preserve"]
 RELATED_TERMS = ["guard", "keep", "watch"]
+HEBREW_TERMS = ["שמר", "משמרת", "נטר"]
 
 
-def _attested(base: str, suffix: str, form: str, transliteration: str, *references: str) -> ResolvedForm:
-    return ResolvedForm(base, suffix, form, transliteration, Attestation.ATTESTED, references)
+def _attested(
+    base: str, suffix: str, form: str, transliteration: str, *references: str
+) -> ResolvedForm:
+    return ResolvedForm(
+        base, suffix, form, transliteration, Attestation.ATTESTED, references
+    )
 
 
 _SHAMAR_SUFFIXED = {
@@ -25,7 +31,9 @@ _SHAMAR_SUFFIXED = {
 }
 
 _MISHMERET_SUFFIXED = {
-    ("מִשְׁמֶרֶת", SuffixId.P1CS): _attested("מִשְׁמַרְתִּ", "י", "מִשְׁמַרְתִּי", "mišmartî", "Leviticus 22:9"),
+    ("מִשְׁמֶרֶת", SuffixId.P1CS): _attested(
+        "מִשְׁמַרְתִּ", "י", "מִשְׁמַרְתִּי", "mišmartî", "Leviticus 22:9"
+    ),
 }
 
 # לְ contracts with every pronominal suffix into a single attested form
@@ -639,3 +647,11 @@ LEXICAL_RESULTS: list[LexicalResult] = [
 def lookup(query: str) -> list[LexicalResult]:
     """Return the demonstration results for a supported English query, ordered by relevance."""
     return LEXICAL_RESULTS if query.strip().lower() in SUPPORTED_QUERIES else []
+
+
+def hebrew_lookup(query: str) -> list[LexicalResult]:
+    """Return the demonstration results spelled like a Hebrew word, ignoring points and plene spelling."""
+    letters = skeleton(consonants(query))
+    if not letters:
+        return []
+    return [result for result in LEXICAL_RESULTS if letters in skeleton(consonants(result.lemma))]

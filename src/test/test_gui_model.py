@@ -49,7 +49,9 @@ def test_attested_suffixed_form_overrides_reconstruction():
 
 
 def test_nouns_take_possessive_suffixes():
-    resolved = resolve_form(row(MISHMERET, "absolute", "מִשְׁמָרוֹת"), MISHMERET, SuffixId.P3MS)
+    resolved = resolve_form(
+        row(MISHMERET, "absolute", "מִשְׁמָרוֹת"), MISHMERET, SuffixId.P3MS
+    )
     assert resolved.suffix == "וֹ"
 
 
@@ -97,8 +99,16 @@ def test_suffixes_are_left_out_when_reconstruction_is_off():
     from dataclasses import replace
 
     attested_only = replace(SHAMAR, reconstruct_suffixes=False)
-    assert resolve_form(row(SHAMAR, "perfect", "שָׁמַר"), attested_only, SuffixId.P3MS) is None
-    assert resolve_form(row(SHAMAR, "imperative", "שְׁמֹר"), attested_only, SuffixId.P1CS).form == "שָׁמְרֵנִי"
+    assert (
+        resolve_form(row(SHAMAR, "perfect", "שָׁמַר"), attested_only, SuffixId.P3MS)
+        is None
+    )
+    assert (
+        resolve_form(
+            row(SHAMAR, "imperative", "שְׁמֹר"), attested_only, SuffixId.P1CS
+        ).form
+        == "שָׁמְרֵנִי"
+    )
 
 
 def test_entries_without_stems_show_every_group():

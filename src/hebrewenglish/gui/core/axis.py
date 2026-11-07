@@ -1,14 +1,18 @@
 from dataclasses import dataclass
 
 from hebrewenglish.common.maybe import Maybe
+
+
 @dataclass
 class Labelled[T]:
     value: T
     label: Maybe[str]
 
+
 def basic[T](value: T, label: Maybe[str] = None) -> Labelled[T]:
     # Keep the label as text; building ui.label here would run at import time, outside any page
     return Labelled(value, label)
+
 
 type Axis = Labelled[list[Labelled[str]]]
 

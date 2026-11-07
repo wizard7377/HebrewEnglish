@@ -4,10 +4,10 @@ These types mirror the Figma Make prototype's ``lexiconData.ts``. They hold disp
 ``gui/adapter.py`` fills them from the real lexicon and morphology, ``gui/demo.py`` by hand.
 """
 
+import unicodedata
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal
-import unicodedata
 
 from hebrewenglish.common.maybe import Maybe
 
@@ -124,13 +124,21 @@ class LexicalResult:
     morphology: list[MorphologyGroup]
     category_label: Maybe[str] = None
     # Attested suffixed forms, keyed by (row suffix key, suffix)
-    suffixed_forms: dict[tuple[str, SuffixId], ResolvedForm] = field(default_factory=dict)
+    suffixed_forms: dict[tuple[str, SuffixId], ResolvedForm] = field(
+        default_factory=dict
+    )
     # Whether a suffix missing from suffixed_forms is built by joining base and suffix, or left out
     reconstruct_suffixes: bool = True
+    # The Strong's number ("8104") that picks out the entry in other lexicons, when the result has one
+    strong_number: Maybe[str] = None
+    # How often the lemma occurs in the Hebrew Bible, when the morphology knows
+    occurrences: Maybe[int] = None
 
     @property
     def root(self) -> str:
-        return next((p.value for p in self.properties if p.label in ("Root", "Base")), "")
+        return next(
+            (p.value for p in self.properties if p.label in ("Root", "Base")), ""
+        )
 
     @property
     def visible_groups(self) -> list[MorphologyGroup]:
@@ -141,7 +149,11 @@ class LexicalResult:
 
     @property
     def stems(self) -> list[str]:
-        return list(dict.fromkeys(group.stem for group in self.morphology if group.stem is not None))
+        return list(
+            dict.fromkeys(
+                group.stem for group in self.morphology if group.stem is not None
+            )
+        )
 
     def groups_for(self, stem: Maybe[str]) -> list[MorphologyGroup]:
         """The visible groups of one stem, or all of them when the entry has no stems."""
@@ -158,7 +170,9 @@ class LexicalResult:
         }.get(self.part_of_speech)
 
 
-def resolve_form(row: MorphologyRow, result: LexicalResult, suffix_id: SuffixId) -> Maybe[ResolvedForm]:
+def resolve_form(
+    row: MorphologyRow, result: LexicalResult, suffix_id: SuffixId
+) -> Maybe[ResolvedForm]:
     """The row's form with the suffix applied, or None when there is no such form to show."""
     if suffix_id is SuffixId.NONE:
         if not row.form:
@@ -202,7 +216,9 @@ def split_clusters(value: str) -> list[str]:
 
 def bare_consonant(value: str) -> str:
     return "".join(
-        c for c in unicodedata.normalize("NFD", value) if not unicodedata.category(c).startswith("M")
+        c
+        for c in unicodedata.normalize("NFD", value)
+        if not unicodedata.category(c).startswith("M")
     )
 
 
@@ -218,7 +234,10 @@ def highlight_segments(resolved: ResolvedForm, root: str) -> list[Segment]:
         # Without a known root nothing can be told apart as inflection
         if not root_letters:
             segments.append(("root", cluster))
-        elif root_index < len(root_letters) and bare_consonant(cluster) == root_letters[root_index]:
+        elif (
+            root_index < len(root_letters)
+            and bare_consonant(cluster) == root_letters[root_index]
+        ):
             root_index += 1
             segments.append(("root", cluster))
         else:
@@ -261,8 +280,14 @@ def row_matches_slot(row: MorphologyRow, slot: ParadigmSlot) -> bool:
     return number in label and ("common" in label or gender in label)
 
 
-def paradigm_row(group: MorphologyGroup, person: str, slot: ParadigmSlot) -> Maybe[MorphologyRow]:
+def paradigm_row(
+    group: MorphologyGroup, person: str, slot: ParadigmSlot
+) -> Maybe[MorphologyRow]:
     return next(
-        (row for row in group.rows if row_person(row, group) == person and row_matches_slot(row, slot)),
+        (
+            row
+            for row in group.rows
+            if row_person(row, group) == person and row_matches_slot(row, slot)
+        ),
         None,
     )
