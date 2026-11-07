@@ -1,6 +1,6 @@
 # Davar as a container: build with `docker build -f dockerfile -t davar .`, run with `docker run -p 8080:8080 davar`.
 # Debian rather than Alpine, since numpy and tokenizers ship prebuilt wheels for glibc but would compile on musl.
-FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 
 # No development dependencies, compiled bytecode for a faster start, and copies rather than links from uv's cache
 ENV UV_NO_DEV=1 \
