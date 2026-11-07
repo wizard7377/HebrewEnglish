@@ -1,0 +1,117 @@
+# Builds the Davar container from `dockerfile`, checks that it serves the page, pushes it to the GitHub
+# container registry and publishes a GitHub Page that links to wherever the container is hosted.
+#
+# GitHub Pages serves only static files, so the app itself runs on a container host (Render, Fly.io, Cloud Run,
+# Hugging Face Spaces...) from the image this pushes. Repository settings it reads, all optional:
+#   variable APP_URL          the address of the running app, linked from the page
+#   secret   DEPLOY_HOOK_URL  a URL the host redeploys on when POSTed to, such as a Render deploy hook
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.name.outputs.image }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Name the image
+        id: name
+        # The registry wants lowercase names, and GitHub keeps the repository's capitals
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: dockerfile
+          load: true
+          tags: davar:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check that the container serves the page
+        run: |
+          docker run --detach --name davar --publish 8080:8080 davar:test
+          for attempt in $(seq 60); do
+            if curl --silent --fail http://localhost:8080/ | grep --quiet "Davar"; then
+              echo "Served after about $((attempt * 2)) seconds"
+              docker rm --force davar
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs davar
+          exit 1
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: dockerfile
+          push: true
+          tags: |
+            ${{ steps.name.outputs.image }}:latest
+            ${{ steps.name.outputs.image }}:${{ github.sha }}
+          cache-from: type=gha
+
+      - name: Ask the host to redeploy
+        env:
+          DEPLOY_HOOK_URL: ${{ secrets.DEPLOY_HOOK_URL }}
+        if: env.DEPLOY_HOOK_URL != ''
+        run: curl --silent --fail --request POST "$DEPLOY_HOOK_URL"
+
+  page:
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fill in the page
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+          IMAGE: ${{ needs.image.outputs.image }}
+        run: |
+          mkdir -p _site
+          sed -e "s|__IMAGE__|$IMAGE|g" -e "s|__APP_URL__|$APP_URL|g" site/index.html > _site/index.html
+          # Without a host yet, the page offers only the image
+          if [ -z "$APP_URL" ]; then
+            sed -i '/<!-- app -->/,/<!-- \/app -->/d' _site/index.html
+          fi
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v4
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
